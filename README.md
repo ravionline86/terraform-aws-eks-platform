@@ -53,7 +53,7 @@ aws eks update-kubeconfig \
   --name $(terraform output -raw cluster_name)
 ```
 
-### 3 – Deploy workloads via Helm
+### 3 – Deploy workloads via Helm 
 
 ```bash
 # Nginx
