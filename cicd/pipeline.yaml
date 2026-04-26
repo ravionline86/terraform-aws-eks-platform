@@ -4,7 +4,7 @@ Description: >
   Provisions CodePipeline + CodeBuild triggered by GitHub via CodeStar Connection.
   Stages: Source → TerraformPlan → TerraformApply (manual approval gate) → HelmDeploy
 
-# ── Parameters ─────────────────────────────────────────────────────────────────
+# ── Parameters─────────────────────────────────────────────────────────────────
 Parameters:
   GitHubOwner:
     Type: String
