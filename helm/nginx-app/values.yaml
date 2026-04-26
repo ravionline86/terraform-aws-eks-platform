@@ -1,0 +1,29 @@
+replicaCount: 2
+
+image:
+  repository: nginx
+  tag: "1.25-alpine"
+  pullPolicy: IfNotPresent
+
+service:
+  type: LoadBalancer   # Creates an AWS NLB. Change to ClusterIP for local kind testing.
+  port: 80
+
+resources:
+  requests:
+    cpu: "100m"
+    memory: "64Mi"
+  limits:
+    cpu: "200m"
+    memory: "128Mi"
+
+# Custom HTML served by Nginx
+customHtml: |
+  <!DOCTYPE html>
+  <html>
+  <head><title>EKS Platform</title></head>
+  <body>
+    <h1>EKS Platform – nginx-app</h1>
+    <p>Helm-deployed Nginx on Amazon EKS | ca-west-1</p>
+  </body>
+  </html>

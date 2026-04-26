@@ -1,0 +1,332 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  CI/CD Pipeline for terraform-aws-eks-platform.
+  Provisions CodePipeline + CodeBuild triggered by GitHub via CodeStar Connection.
+  Stages: Source → TerraformPlan → TerraformApply (manual approval gate) → HelmDeploy
+
+# ── Parameters ─────────────────────────────────────────────────────────────────
+Parameters:
+  GitHubOwner:
+    Type: String
+    Description: GitHub username or org (e.g. ravinder-kumar)
+
+  GitHubRepo:
+    Type: String
+    Default: terraform-aws-eks-platform
+
+  GitHubBranch:
+    Type: String
+    Default: main
+
+  CodeStarConnectionArn:
+    Type: String
+    Description: >
+      ARN of an existing CodeStar GitHub connection.
+      Create one in AWS Console → Developer Tools → Connections before deploying this stack.
+
+  TerraformVersion:
+    Type: String
+    Default: "1.7.5"
+
+  ClusterName:
+    Type: String
+    Default: eks-platform-staging
+
+  AWSRegion:
+    Type: String
+    Default: ca-west-1
+
+  AlertEmail:
+    Type: String
+    Default: ""
+
+# ── Resources ──────────────────────────────────────────────────────────────────
+Resources:
+
+  # ── S3 – artifact store ──────────────────────────────────────────────────────
+  ArtifactBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub "eks-platform-pipeline-artifacts-${AWS::AccountId}"
+      VersioningConfiguration:
+        Status: Enabled
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      LifecycleConfiguration:
+        Rules:
+          - Id: ExpireOldArtifacts
+            Status: Enabled
+            ExpirationInDays: 30
+
+  # ── IAM – CodeBuild service role ─────────────────────────────────────────────
+  CodeBuildRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "eks-platform-codebuild-role-${AWS::StackName}"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: codebuild.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AdministratorAccess   # Scope down in production
+      Policies:
+        - PolicyName: S3ArtifactAccess
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: ["s3:GetObject", "s3:PutObject", "s3:GetObjectVersion"]
+                Resource: !Sub "arn:aws:s3:::${ArtifactBucket}/*"
+
+  # ── IAM – CodePipeline service role ──────────────────────────────────────────
+  CodePipelineRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "eks-platform-pipeline-role-${AWS::StackName}"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: codepipeline.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: PipelinePermissions
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                  - s3:GetObjectVersion
+                  - s3:GetBucketVersioning
+                Resource:
+                  - !Sub "arn:aws:s3:::${ArtifactBucket}"
+                  - !Sub "arn:aws:s3:::${ArtifactBucket}/*"
+              - Effect: Allow
+                Action:
+                  - codebuild:BatchGetBuilds
+                  - codebuild:StartBuild
+                Resource: "*"
+              - Effect: Allow
+                Action: codestar-connections:UseConnection
+                Resource: !Ref CodeStarConnectionArn
+              - Effect: Allow
+                Action: sns:Publish
+                Resource: !Ref ApprovalTopic
+
+  # ── SNS – Manual approval notifications ──────────────────────────────────────
+  ApprovalTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub "eks-platform-approvals-${AWS::StackName}"
+
+  # ── CodeBuild – Terraform Plan ────────────────────────────────────────────────
+  TerraformPlanProject:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Name: !Sub "eks-platform-tf-plan-${AWS::StackName}"
+      ServiceRole: !GetAtt CodeBuildRole.Arn
+      Artifacts:
+        Type: CODEPIPELINE
+      Environment:
+        Type: LINUX_CONTAINER
+        ComputeType: BUILD_GENERAL1_SMALL
+        Image: aws/codebuild/standard:7.0
+        EnvironmentVariables:
+          - Name: TF_VERSION
+            Value: !Ref TerraformVersion
+          - Name: CLUSTER_NAME
+            Value: !Ref ClusterName
+          - Name: AWS_DEFAULT_REGION
+            Value: !Ref AWSRegion
+      Source:
+        Type: CODEPIPELINE
+        BuildSpec: |
+          version: 0.2
+          phases:
+            install:
+              commands:
+                - curl -fsSL https://releases.hashicorp.com/terraform/${TF_VERSION}/terraform_${TF_VERSION}_linux_amd64.zip -o tf.zip
+                - unzip tf.zip && mv terraform /usr/local/bin/
+                - terraform version
+            build:
+              commands:
+                - cd terraform/envs/staging
+                - terraform init -input=false
+                - terraform validate
+                - terraform plan -input=false -out=tfplan
+          artifacts:
+            files:
+              - terraform/envs/staging/tfplan
+              - terraform/envs/staging/.terraform.lock.hcl
+            discard-paths: no
+
+  # ── CodeBuild – Terraform Apply ───────────────────────────────────────────────
+  TerraformApplyProject:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Name: !Sub "eks-platform-tf-apply-${AWS::StackName}"
+      ServiceRole: !GetAtt CodeBuildRole.Arn
+      Artifacts:
+        Type: CODEPIPELINE
+      Environment:
+        Type: LINUX_CONTAINER
+        ComputeType: BUILD_GENERAL1_SMALL
+        Image: aws/codebuild/standard:7.0
+        EnvironmentVariables:
+          - Name: TF_VERSION
+            Value: !Ref TerraformVersion
+          - Name: CLUSTER_NAME
+            Value: !Ref ClusterName
+          - Name: AWS_DEFAULT_REGION
+            Value: !Ref AWSRegion
+      Source:
+        Type: CODEPIPELINE
+        BuildSpec: |
+          version: 0.2
+          phases:
+            install:
+              commands:
+                - curl -fsSL https://releases.hashicorp.com/terraform/${TF_VERSION}/terraform_${TF_VERSION}_linux_amd64.zip -o tf.zip
+                - unzip tf.zip && mv terraform /usr/local/bin/
+            build:
+              commands:
+                - cd terraform/envs/staging
+                - terraform init -input=false
+                - terraform apply -input=false -auto-approve tfplan
+
+  # ── CodeBuild – Helm Deploy ───────────────────────────────────────────────────
+  HelmDeployProject:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Name: !Sub "eks-platform-helm-deploy-${AWS::StackName}"
+      ServiceRole: !GetAtt CodeBuildRole.Arn
+      Artifacts:
+        Type: CODEPIPELINE
+      Environment:
+        Type: LINUX_CONTAINER
+        ComputeType: BUILD_GENERAL1_SMALL
+        Image: aws/codebuild/standard:7.0
+        EnvironmentVariables:
+          - Name: CLUSTER_NAME
+            Value: !Ref ClusterName
+          - Name: AWS_DEFAULT_REGION
+            Value: !Ref AWSRegion
+      Source:
+        Type: CODEPIPELINE
+        BuildSpec: |
+          version: 0.2
+          phases:
+            install:
+              commands:
+                - curl https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
+                - aws eks update-kubeconfig --region $AWS_DEFAULT_REGION --name $CLUSTER_NAME
+            build:
+              commands:
+                - helm upgrade --install nginx-app ./helm/nginx-app --namespace default --create-namespace --wait --timeout 5m
+                - helm upgrade --install flask-app ./helm/flask-app --namespace default --wait --timeout 5m
+                - kubectl get pods -n default
+
+  # ── CodePipeline ──────────────────────────────────────────────────────────────
+  Pipeline:
+    Type: AWS::CodePipeline::Pipeline
+    Properties:
+      Name: !Sub "eks-platform-pipeline-${AWS::StackName}"
+      RoleArn: !GetAtt CodePipelineRole.Arn
+      ArtifactStore:
+        Type: S3
+        Location: !Ref ArtifactBucket
+      Stages:
+        # Stage 1: Pull source from GitHub
+        - Name: Source
+          Actions:
+            - Name: GitHubSource
+              ActionTypeId:
+                Category: Source
+                Owner: AWS
+                Provider: CodeStarSourceConnection
+                Version: "1"
+              Configuration:
+                ConnectionArn: !Ref CodeStarConnectionArn
+                FullRepositoryId: !Sub "${GitHubOwner}/${GitHubRepo}"
+                BranchName: !Ref GitHubBranch
+                OutputArtifactFormat: CODE_ZIP
+              OutputArtifacts:
+                - Name: SourceCode
+
+        # Stage 2: Terraform Plan (always runs, safe to inspect)
+        - Name: TerraformPlan
+          Actions:
+            - Name: Plan
+              ActionTypeId:
+                Category: Build
+                Owner: AWS
+                Provider: CodeBuild
+                Version: "1"
+              InputArtifacts:
+                - Name: SourceCode
+              OutputArtifacts:
+                - Name: TerraformPlan
+              Configuration:
+                ProjectName: !Ref TerraformPlanProject
+
+        # Stage 3: Manual approval gate before apply
+        - Name: ApproveApply
+          Actions:
+            - Name: ReviewPlan
+              ActionTypeId:
+                Category: Approval
+                Owner: AWS
+                Provider: Manual
+                Version: "1"
+              Configuration:
+                NotificationArn: !Ref ApprovalTopic
+                CustomData: "Review the Terraform plan output in CodeBuild logs before approving."
+
+        # Stage 4: Terraform Apply
+        - Name: TerraformApply
+          Actions:
+            - Name: Apply
+              ActionTypeId:
+                Category: Build
+                Owner: AWS
+                Provider: CodeBuild
+                Version: "1"
+              InputArtifacts:
+                - Name: TerraformPlan
+              Configuration:
+                ProjectName: !Ref TerraformApplyProject
+
+        # Stage 5: Helm deploy
+        - Name: HelmDeploy
+          Actions:
+            - Name: Deploy
+              ActionTypeId:
+                Category: Build
+                Owner: AWS
+                Provider: CodeBuild
+                Version: "1"
+              InputArtifacts:
+                - Name: SourceCode
+              Configuration:
+                ProjectName: !Ref HelmDeployProject
+
+# ── Outputs ────────────────────────────────────────────────────────────────────
+Outputs:
+  PipelineUrl:
+    Description: Direct link to the pipeline in AWS Console
+    Value: !Sub "https://${AWSRegion}.console.aws.amazon.com/codesuite/codepipeline/pipelines/${Pipeline}/view"
+
+  ArtifactBucketName:
+    Value: !Ref ArtifactBucket
+
+  ApprovalTopicArn:
+    Description: Subscribe your email to this SNS topic to receive approval requests
+    Value: !Ref ApprovalTopic

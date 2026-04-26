@@ -1,0 +1,31 @@
+replicaCount: 2
+
+image:
+  repository: python          # Replace with your ECR image after docker build+push
+  tag: "3.12-slim"            # Replace with your actual image tag
+  pullPolicy: IfNotPresent
+
+service:
+  type: ClusterIP
+  port: 80
+  targetPort: 5000
+
+env:
+  APP_VERSION: "1.0.0"
+  ENVIRONMENT: "staging"
+  PORT: "5000"
+
+# IRSA annotation – populate with the pod_exec_role_arn from Terraform output
+serviceAccount:
+  create: true
+  annotations: {}
+  # annotations:
+  #   eks.amazonaws.com/role-arn: "arn:aws:iam::ACCOUNT_ID:role/eks-platform-staging-pod-exec-role"
+
+resources:
+  requests:
+    cpu: "100m"
+    memory: "128Mi"
+  limits:
+    cpu: "250m"
+    memory: "256Mi"

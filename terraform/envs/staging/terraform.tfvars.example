@@ -1,0 +1,7 @@
+# Copy this file to terraform.tfvars and fill in your values.
+# terraform.tfvars is git-ignored (contains personal config).
+
+aws_region          = "ca-west-1"
+cluster_name        = "eks-platform-staging"
+allowed_cidr_blocks = ["0.0.0.0/0"]   # Replace with your IP: ["x.x.x.x/32"]
+alert_email         = ""               # e.g. "ravionline86@gmail.com"
