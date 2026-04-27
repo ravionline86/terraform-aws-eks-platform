@@ -5,7 +5,7 @@
 # access) but locked to your CIDR via public_access_cidrs.
 # -----------------------------------------------------------------------------
 
-# ── EKS Control Plane ─────────────────────────────────────────────────────────
+# ── EKS Control Plane Setting ─────────────────────────────────────────────────────────
 resource "aws_eks_cluster" "this" {
   name     = var.cluster_name
   version  = var.kubernetes_version
